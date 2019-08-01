@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# Unofficial Bash Strict Mode (http://redsymbol.net/articles/unofficial-bash-strict-mode/)
+set -euo pipefail
+
+
+MAX_WAIT_SECS=120
+
+
+function print_usage()
+{
+    echo "usage: $0 job_spec [job_spec...]"
+    echo
+    echo "Waits for completion of the specified jobs."
+} >&2
+
+
+if (( $# == 0 ));
+then
+    print_usage
+
+    exit 1
+fi
+
+IFS=","
+ALL_DONE='
+    BEGIN { IFS = "|" }
+    ($1 != "Unknown") { ++done }
+    END {
+        all_done = NR > 0 && done==NR
+        exit (all_done ? 0 : 1);
+    }
+'
+
+SECS_WAITED=0
+while ! (sacct --jobs="$*" --noheader --parsable2 -o End | awk "$ALL_DONE");
+do
+    sleep 15
+    SECS_WAITED+=15
+
+    if [[ -v MAX_WAIT_SECS ]] && (( SECS_WAITED >= MAX_WAIT_SECS ));
+    then
+        if (( $(sacct --jobs="$*" --noheader --parsable2 -o '' | wc -l) < $# ));
+        then
+            echo "$0: invalid job ids: still cannot access accounting information after $MAX_WAIT_SECS seconds" >&2
+
+            exit 1
+        else
+            unset MAX_WAIT_SECS
+        fi
+    fi
+done
+
+EXIT_STATE='
+    function max(a, b)
+    {
+        return a < b ? b : a;
+    }
+
+    BEGIN {
+        EXIT = 0;
+        FS = "[:|]+";
+        OFS = ";"
+    }
+
+    {
+        EXIT = $1 == "COMPLETED" ? max(EXIT, max($2, $3)) : 1;
+
+        if (EXIT > 0)
+            exit;
+    }
+
+    END { print EXIT }
+'
+
+exit $(sacct --jobs="$*" --noheader --parsable2 -o State,ExitCode | awk "$EXIT_STATE")
