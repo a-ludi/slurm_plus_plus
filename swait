@@ -22,25 +22,62 @@ then
     exit 1
 fi
 
-IFS=","
-ALL_DONE='
-    BEGIN { IFS = "|" }
-    ($1 != "Unknown") { ++done }
-    END {
-        all_done = NR > 0 && done==NR
-        exit (all_done ? 0 : 1);
-    }
-'
 
-SECS_WAITED=0
-while ! (sacct --jobs="$*" --noheader --parsable2 -o End | awk "$ALL_DONE");
+function all_done()
+{
+    local IFS=','
+    local NUM_WAITING
+    # NOTE the additional job ID 1 prevents an error that only occurrs if a
+    #      single job ID is given.
+    NUM_WAITING="$({ squeue -hro '' "-j1,$*"; } | wc -l)"
+
+    (( NUM_WAITING == 0 ))
+}
+
+
+function count_regsitered_jobs()
+{
+    local IFS=','
+
+    sacct --jobs="$*" --noheader --parsable2 -o '' | wc -l
+}
+
+
+function exit_with_job_status()
+{
+    local IFS=','
+
+    sacct --jobs="$*" --noheader --parsable2 -o State,ExitCode | \
+    awk '
+        function max(a, b)
+        {
+            return a < b ? b : a;
+        }
+
+        BEGIN {
+            EXIT = 0;
+            FS = "[:|]+";
+            OFS = ";"
+        }
+
+        {
+            EXIT = $1 == "COMPLETED" ? max(EXIT, max($2, $3)) : 1;
+
+            if (EXIT > 0)
+                exit EXIT;
+        }
+    '
+}
+
+
+STARTED_AT="$(date +%s)"
+while ! all_done "$@";
 do
     sleep 15
-    SECS_WAITED+=15
 
-    if [[ -v MAX_WAIT_SECS ]] && (( SECS_WAITED >= MAX_WAIT_SECS ));
+    if [[ -v MAX_WAIT_SECS ]] && (( $(date +%s) - STARTED_AT >= MAX_WAIT_SECS ));
     then
-        if (( $(sacct --jobs="$*" --noheader --parsable2 -o '' | wc -l) < $# ));
+        if (( $(count_regsitered_jobs "$@") < $# ));
         then
             echo "$0: invalid job ids: still cannot access accounting information after $MAX_WAIT_SECS seconds" >&2
 
@@ -51,26 +88,4 @@ do
     fi
 done
 
-EXIT_STATE='
-    function max(a, b)
-    {
-        return a < b ? b : a;
-    }
-
-    BEGIN {
-        EXIT = 0;
-        FS = "[:|]+";
-        OFS = ";"
-    }
-
-    {
-        EXIT = $1 == "COMPLETED" ? max(EXIT, max($2, $3)) : 1;
-
-        if (EXIT > 0)
-            exit;
-    }
-
-    END { print EXIT }
-'
-
-exit $(sacct --jobs="$*" --noheader --parsable2 -o State,ExitCode | awk "$EXIT_STATE")
+exit_with_job_status "$@"
